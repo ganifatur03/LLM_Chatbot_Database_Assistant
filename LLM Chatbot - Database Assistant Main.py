@@ -15,13 +15,14 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 if not openai.api_key:
     raise ValueError("OpenAI API key not found in environment variables")
 
-# Load CSV file
-csv_file = "/content/Example2_data_pyspark.csv"
-df = pd.read_csv(csv_file)
-
-# Create SQLite database
-db_conn = sqlite3.connect("Employee Database.db")
+# Membuat sambungan ke sqlite dan membuat database
+db_file = 'example.db'
+db_conn = sqlite3.connect(db_file)
 cursor = db_conn.cursor()
+
+# Menyimpan dan membaca file CSV yang akan ddimasukkan ke db
+csv_file = r"C:/Users/sprat/Documents/example_data_employee.csv"
+df = pd.read_csv(csv_file)
 
 def list_tables() -> list[str]:
     """Retrieve the names of all tables in the database."""
@@ -31,7 +32,7 @@ def list_tables() -> list[str]:
     cursor = db_conn.cursor()
 
     # Fetch the table names.
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
 
     tables = cursor.fetchall()
     return [t[0] for t in tables]
@@ -61,42 +62,88 @@ def execute_query(sql: str) -> list[list[str]]:
     cursor.execute(sql)
     return cursor.fetchall()
 
-def initialize_database():
-    """Initialize the database with CSV data if it doesn't exist or is empty."""
-    print("Checking database status...")
+# Drop tabel kalau perlu
+#drop_table = """DROP TABLE IF EXISTS (nama tabel)"""
+#cursor.execute(drop_table)
 
-    # Check if table exists and has data
-    cursor = db_conn.cursor()
-    tables = list_tables()
+# Membuat tabel (CREATE TABLE kalau belum ada nama_tabel(kolom1, kolom 2, kolom seterusnya))
+create_table = '''CREATE TABLE IF NOT EXISTS DummyEmployee(
+                employee_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                contact_number INTEGER NOT NULL,
+                gender TEXT NOT NULL,
+                age INTEGER NOT NULL,
+                address TEXT NOT NULL,
+                job TEXT NOT NULL,
+                salary INTEGER NOT NULL);
+                '''
+# Menjalankan membuat table
+cursor.execute(create_table)
 
-    if "employee" not in tables:
-        print("Creating new employee table from CSV...")
-        df = pd.read_csv(csv_file)  # Read CSV file again to ensure fresh data
-        df.to_sql("employee", db_conn, if_exists="fail", index=False)
-        print("Database initialized successfully")
-    else:
-        # Check if table is empty
-        cursor.execute("SELECT COUNT(*) FROM employee")
-        count = cursor.fetchone()[0]
+# Memasukkan data dari file CSV ke SQLite (nama tabel, koneksi ke tabel, jika_tabel_ada, setting_index)
+df.to_sql("DummyEmployee", db_conn, if_exists='replace',index=False)
 
-        if count == 0:
-            print("Table exists but is empty. Loading CSV data...")
-            df = pd.read_csv(csv_file)  # Read CSV file again to ensure fresh data
-            df.to_sql("employee", db_conn, if_exists="append", index=False)
-            print("Data loaded successfully")
-        else:
-            print(f"Using existing database with {count} records")
+# Kode kalau mau ngecek isi tabel yang sudah dibuat
+"""cursor.execute('SELECT * FROM DummyEmployee')
+rows = cursor.fetchall()
+cursor.close()
+for row in rows:
+   print(row)"""
 
-# Update the system instruction
-instruction = """You are a helpful chatbot that can interact with an SQL database for an employee database.
-You will take the users questions and turn them into SQL queries using the tools available.
-You can only:
-1. Query data using SELECT statements
-2. Retrieve table schemas
-3. List available tables
+# Buat instruksi untuk AI Chatbox
+instruction = """You are a helpful chatbox that can interact with SQL database for a company computer. You will take users questions 
+and turn them into SQL queries using tools available. Once you have information you need, you will answer the user's question using
+the data returned. Use list_tables to see what tables are present, describe_table to understand the schema, and execute_query to
+issue a SQL SELECT query. All queries should consider case insensitivity. Always convert text inputs to lowercase for comparison."""
 
-First use list_tables to see available tables, and describe_table to understand the schema.
-Then you can execute_query for SELECT operations."""
+# Membuat penjelasan untuk tools chatbox untuk dimengerti oleh OpenAI
+chatbox_tools= [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tables",
+            "description": "Get the list of all tables in the database",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "describe_table",
+            "description": "Get the schema of a specific table",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to describe"
+                    }
+                },
+                "required": ["table_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_query",
+            "description": "Execute a SQL SELECT query",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "SQL SELECT query to execute"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    }
+]
 
 def process_request(user_query: str):
     tools = {
@@ -105,9 +152,16 @@ def process_request(user_query: str):
         "execute_query": lambda args: execute_query(args.get("query"))
     }
 
+    # Menyatakan role dan konten untuk nanti digunakan di prompt AI
     messages = [
-        {"role": "system", "content": instruction},
-        {"role": "user", "content": user_query}
+        {
+            "role": "system",
+            "content": instruction
+        },
+        {
+            "role": "user",
+            "content": user_query
+        }
     ]
 
     while True:
@@ -115,54 +169,7 @@ def process_request(user_query: str):
             response = openai.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "list_tables",
-                            "description": "List all tables in the database",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {}
-                            }
-                        }
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "describe_table",
-                            "description": "Get the schema of a specific table",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "table_name": {
-                                        "type": "string",
-                                        "description": "Name of the table to describe"
-                                    }
-                                },
-                                "required": ["table_name"]
-                            }
-                        }
-                    },
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "execute_query",
-                            "description": "Execute a SQL SELECT query",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "query": {
-                                        "type": "string",
-                                        "description": "SQL SELECT query to execute"
-                                    }
-                                },
-                                "required": ["query"]
-                            }
-                        }
-                    }
-                ],
-                tool_choice="auto"
+                tools=chatbox_tools
             )
 
             message = response.choices[0].message
@@ -222,9 +229,6 @@ def interactive_database_session():
             break
         except Exception as e:
             print(f"An error occurred: {e}")
-
-# Initialize database
-initialize_database()
 
 # Start interactive session
 interactive_database_session()
